@@ -25,7 +25,7 @@ USAGE
 
 log_status() {
   local msg="$1"
-  printf "%s %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >&2
+  printf "%s %s\n" "$(date +%Y-%m-%dT%H:%M:%S%z)" "$msg" >&2
 }
 
 run_listing() {
