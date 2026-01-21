@@ -149,7 +149,11 @@ wait_for_slot() {
         new_pids+=("$pid")
       fi
     done
-    PIDS=("${new_pids[@]}")
+    if [[ ${#new_pids[@]} -gt 0 ]]; then
+      PIDS=("${new_pids[@]}")
+    else
+      PIDS=()
+    fi
     if [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; then
       sleep 1
     fi
