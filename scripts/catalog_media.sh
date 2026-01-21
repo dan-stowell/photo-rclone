@@ -30,6 +30,23 @@ log_status() {
   printf "%s %s\n" "$(date +%Y-%m-%dT%H:%M:%S%z)" "$msg" >&2
 }
 
+is_chunk_done() {
+  local db="$1"
+  local run_id="$2"
+  local source="$3"
+  local chunk_name="$4"
+
+  python3 -c "
+import sqlite3, sys
+conn = sqlite3.connect('$db')
+row = conn.execute(
+    'SELECT status FROM chunks WHERE run_id=? AND source=? AND chunk_name=?',
+    ('$run_id', '$source', '$chunk_name')
+).fetchone()
+sys.exit(0 if row and row[0] == 'ingested' else 1)
+"
+}
+
 run_listing() {
   local label="$1"
   local tmp_file="$2"
@@ -152,7 +169,6 @@ run_one() {
   local source="$1"
   local remote="$2"
   local log_file="$OUT_DIR/logs/${source}_${RUN_ID}.rclone.log"
-  local done_file="$OUT_DIR/raw/${source}_${RUN_ID}.done_dirs"
   local topdirs_file="$OUT_DIR/raw/${source}_${RUN_ID}.topdirs"
 
   if [[ -f "$topdirs_file" && "$FORCE" != "true" ]]; then
@@ -190,12 +206,12 @@ run_one() {
   if [[ $HASH_PARTITIONS -gt 1 ]]; then
     for k in $(seq 0 $((HASH_PARTITIONS - 1))); do
       wait_for_slot
-      process_hash_chunk "$source" "$remote" "$root_chunk" "$k" "$HASH_PARTITIONS" "$done_file" "$log_file" &
+      process_hash_chunk "$source" "$remote" "$root_chunk" "$k" "$HASH_PARTITIONS" "$log_file" &
       PIDS+=($!)
     done
     wait_all_pids
   else
-    process_chunk "$source" "$remote" "$root_chunk" "$done_file" "$log_file"
+    process_chunk "$source" "$remote" "$root_chunk" "$log_file"
   fi
 
   if [[ ${#TOP_DIRS[@]} -eq 0 ]]; then
@@ -205,12 +221,12 @@ run_one() {
       if [[ $HASH_PARTITIONS -gt 1 ]]; then
         for k in $(seq 0 $((HASH_PARTITIONS - 1))); do
           wait_for_slot
-          process_hash_chunk "$source" "$remote" "$dir" "$k" "$HASH_PARTITIONS" "$done_file" "$log_file" &
+          process_hash_chunk "$source" "$remote" "$dir" "$k" "$HASH_PARTITIONS" "$log_file" &
           PIDS+=($!)
         done
         wait_all_pids
       else
-        process_chunk "$source" "$remote" "$dir" "$done_file" "$log_file"
+        process_chunk "$source" "$remote" "$dir" "$log_file"
       fi
     done
   fi
@@ -220,10 +236,9 @@ process_chunk() {
   local source="$1"
   local remote="$2"
   local dir="$3"
-  local done_file="$4"
-  local log_file="$5"
+  local log_file="$4"
 
-  if [[ -f "$done_file" ]] && grep -Fqx -- "$dir" "$done_file"; then
+  if is_chunk_done "$OUT_DIR/media_catalog.sqlite" "$RUN_ID" "$source" "$dir"; then
     echo "Skipping already completed chunk: $dir"
     return 0
   fi
@@ -265,8 +280,19 @@ process_chunk() {
         --rclone-command "$rclone_cmd" \
         --chunk-name "$dir" \
         --chunk-status listing
-      run_listing "${source} root" "$tmp_file" "$log_file" \
-        rclone lsl "${RCLONE_OPTS_ARR[@]}" --max-depth 1 "${remote}"
+      if ! run_listing "${source} root" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" --max-depth 1 "${remote}"; then
+        python3 scripts/catalog_media.py \
+          --db "$OUT_DIR/media_catalog.sqlite" \
+          --run-id "$RUN_ID" \
+          --source "$source" \
+          --remote "$remote" \
+          --raw-file "$raw_file" \
+          --rclone-command "$rclone_cmd" \
+          --chunk-name "$dir" \
+          --chunk-status error
+        return 1
+      fi
       mv "$tmp_file" "$raw_file"
       python3 scripts/catalog_media.py \
         --db "$OUT_DIR/media_catalog.sqlite" \
@@ -303,8 +329,19 @@ process_chunk() {
         --rclone-command "$rclone_cmd" \
         --chunk-name "$dir" \
         --chunk-status listing
-      run_listing "${source} ${dir}" "$tmp_file" "$log_file" \
-        rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}${dir}"
+      if ! run_listing "${source} ${dir}" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}${dir}"; then
+        python3 scripts/catalog_media.py \
+          --db "$OUT_DIR/media_catalog.sqlite" \
+          --run-id "$RUN_ID" \
+          --source "$source" \
+          --remote "$remote" \
+          --raw-file "$raw_file" \
+          --rclone-command "$rclone_cmd" \
+          --chunk-name "$dir" \
+          --chunk-status error
+        return 1
+      fi
       mv "$tmp_file" "$raw_file"
       python3 scripts/catalog_media.py \
         --db "$OUT_DIR/media_catalog.sqlite" \
@@ -336,8 +373,6 @@ process_chunk() {
     --rclone-command "$rclone_cmd" \
     --chunk-name "$dir" \
     --chunk-status ingested
-
-  printf "%s\n" "$dir" >> "$done_file"
 }
 
 process_hash_chunk() {
@@ -346,12 +381,11 @@ process_hash_chunk() {
   local dir="$3"
   local partition="$4"
   local total_partitions="$5"
-  local done_file="$6"
-  local log_file="$7"
+  local log_file="$6"
 
   local chunk_name="${dir}#${partition}/${total_partitions}"
 
-  if [[ -f "$done_file" ]] && grep -Fqx -- "$chunk_name" "$done_file"; then
+  if is_chunk_done "$OUT_DIR/media_catalog.sqlite" "$RUN_ID" "$source" "$chunk_name"; then
     echo "Skipping already completed hash chunk: $chunk_name"
     return 0
   fi
@@ -393,8 +427,19 @@ process_hash_chunk() {
         --rclone-command "$rclone_cmd" \
         --chunk-name "$chunk_name" \
         --chunk-status listing
-      run_listing "${source} root #${partition}/${total_partitions}" "$tmp_file" "$log_file" \
-        rclone lsl "${RCLONE_OPTS_ARR[@]}" --hash-filter "${partition}/${total_partitions}" --max-depth 1 "${remote}"
+      if ! run_listing "${source} root #${partition}/${total_partitions}" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" --hash-filter "${partition}/${total_partitions}" --max-depth 1 "${remote}"; then
+        python3 scripts/catalog_media.py \
+          --db "$OUT_DIR/media_catalog.sqlite" \
+          --run-id "$RUN_ID" \
+          --source "$source" \
+          --remote "$remote" \
+          --raw-file "$raw_file" \
+          --rclone-command "$rclone_cmd" \
+          --chunk-name "$chunk_name" \
+          --chunk-status error
+        return 1
+      fi
       mv "$tmp_file" "$raw_file"
       python3 scripts/catalog_media.py \
         --db "$OUT_DIR/media_catalog.sqlite" \
@@ -431,8 +476,19 @@ process_hash_chunk() {
         --rclone-command "$rclone_cmd" \
         --chunk-name "$chunk_name" \
         --chunk-status listing
-      run_listing "${source} ${dir} #${partition}/${total_partitions}" "$tmp_file" "$log_file" \
-        rclone lsl "${RCLONE_OPTS_ARR[@]}" --hash-filter "${partition}/${total_partitions}" "${remote}${dir}"
+      if ! run_listing "${source} ${dir} #${partition}/${total_partitions}" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" --hash-filter "${partition}/${total_partitions}" "${remote}${dir}"; then
+        python3 scripts/catalog_media.py \
+          --db "$OUT_DIR/media_catalog.sqlite" \
+          --run-id "$RUN_ID" \
+          --source "$source" \
+          --remote "$remote" \
+          --raw-file "$raw_file" \
+          --rclone-command "$rclone_cmd" \
+          --chunk-name "$chunk_name" \
+          --chunk-status error
+        return 1
+      fi
       mv "$tmp_file" "$raw_file"
       python3 scripts/catalog_media.py \
         --db "$OUT_DIR/media_catalog.sqlite" \
@@ -464,8 +520,6 @@ process_hash_chunk() {
     --rclone-command "$rclone_cmd" \
     --chunk-name "$chunk_name" \
     --chunk-status ingested
-
-  printf "%s\n" "$chunk_name" >> "$done_file"
 }
 
 if [[ -n "$WASABI_REMOTE" ]]; then
