@@ -11,6 +11,8 @@ Options:
   --out DIR           Output directory (default: ./catalog)
   --run-id ID         Resume or tag a run with a specific ID (default: UTC timestamp)
   --force             Re-run rclone listing even if raw file exists
+  --hash-partitions N Split directories into N hash-filter partitions (default: 1)
+  --max-parallel N    Maximum parallel operations (default: 4)
   --help              Show this help
 
 Environment:
@@ -68,6 +70,8 @@ GDRIVE_REMOTE=""
 OUT_DIR="./catalog"
 RUN_ID=""
 FORCE="false"
+HASH_PARTITIONS=1
+MAX_PARALLEL=4
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -81,6 +85,10 @@ while [[ $# -gt 0 ]]; do
       RUN_ID="${2:-}"; shift 2 ;;
     --force)
       FORCE="true"; shift ;;
+    --hash-partitions)
+      HASH_PARTITIONS="${2:-}"; shift 2 ;;
+    --max-parallel)
+      MAX_PARALLEL="${2:-}"; shift 2 ;;
     --help|-h)
       usage; exit 0 ;;
     *)
@@ -111,6 +119,33 @@ mkdir -p "$OUT_DIR/raw" "$OUT_DIR/logs"
 
 record_run_id() {
   printf "%s\n" "$RUN_ID" > "$OUT_DIR/last_run_id"
+}
+
+# Parallel job control (bash 3.2 compatible - no wait -n)
+PIDS=()
+
+wait_for_slot() {
+  while [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; do
+    local new_pids=()
+    for pid in "${PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        new_pids+=("$pid")
+      fi
+    done
+    PIDS=("${new_pids[@]}")
+    if [[ ${#PIDS[@]} -ge $MAX_PARALLEL ]]; then
+      sleep 1
+    fi
+  done
+}
+
+wait_all_pids() {
+  local rc=0
+  for pid in "${PIDS[@]}"; do
+    wait "$pid" || rc=$?
+  done
+  PIDS=()
+  return $rc
 }
 
 run_one() {
@@ -152,13 +187,31 @@ run_one() {
 
   # Always process root-level files separately (files not in any top-level dir).
   local root_chunk="__root__"
-  process_chunk "$source" "$remote" "$root_chunk" "$done_file" "$log_file"
+  if [[ $HASH_PARTITIONS -gt 1 ]]; then
+    for k in $(seq 0 $((HASH_PARTITIONS - 1))); do
+      wait_for_slot
+      process_hash_chunk "$source" "$remote" "$root_chunk" "$k" "$HASH_PARTITIONS" "$done_file" "$log_file" &
+      PIDS+=($!)
+    done
+    wait_all_pids
+  else
+    process_chunk "$source" "$remote" "$root_chunk" "$done_file" "$log_file"
+  fi
 
   if [[ ${#TOP_DIRS[@]} -eq 0 ]]; then
     echo "No top-level dirs found; root listing should cover all objects."
   else
     for dir in "${TOP_DIRS[@]}"; do
-      process_chunk "$source" "$remote" "$dir" "$done_file" "$log_file"
+      if [[ $HASH_PARTITIONS -gt 1 ]]; then
+        for k in $(seq 0 $((HASH_PARTITIONS - 1))); do
+          wait_for_slot
+          process_hash_chunk "$source" "$remote" "$dir" "$k" "$HASH_PARTITIONS" "$done_file" "$log_file" &
+          PIDS+=($!)
+        done
+        wait_all_pids
+      else
+        process_chunk "$source" "$remote" "$dir" "$done_file" "$log_file"
+      fi
     done
   fi
 }
@@ -285,6 +338,134 @@ process_chunk() {
     --chunk-status ingested
 
   printf "%s\n" "$dir" >> "$done_file"
+}
+
+process_hash_chunk() {
+  local source="$1"
+  local remote="$2"
+  local dir="$3"
+  local partition="$4"
+  local total_partitions="$5"
+  local done_file="$6"
+  local log_file="$7"
+
+  local chunk_name="${dir}#${partition}/${total_partitions}"
+
+  if [[ -f "$done_file" ]] && grep -Fqx -- "$chunk_name" "$done_file"; then
+    echo "Skipping already completed hash chunk: $chunk_name"
+    return 0
+  fi
+
+  local raw_suffix
+  if [[ "$dir" == "__root__" ]]; then
+    raw_suffix="root.hash-${partition}of${total_partitions}"
+  else
+    raw_suffix="${dir%/}"
+    raw_suffix="${raw_suffix//\//__}"
+    raw_suffix="${raw_suffix:-root}.hash-${partition}of${total_partitions}"
+  fi
+
+  local raw_file="$OUT_DIR/raw/${source}_${RUN_ID}.${raw_suffix}.lsl"
+  local rclone_cmd
+
+  if [[ "$dir" == "__root__" ]]; then
+    rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} --hash-filter ${partition}/${total_partitions} --max-depth 1 ${remote}"
+    if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
+      echo "Reusing existing raw listing: $raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$chunk_name" \
+        --chunk-status listed
+    else
+      echo "Listing ${source} root hash partition ${partition}/${total_partitions}..."
+      local tmp_file="${raw_file}.tmp"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$chunk_name" \
+        --chunk-status listing
+      run_listing "${source} root #${partition}/${total_partitions}" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" --hash-filter "${partition}/${total_partitions}" --max-depth 1 "${remote}"
+      mv "$tmp_file" "$raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$chunk_name" \
+        --chunk-status listed
+    fi
+  else
+    rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} --hash-filter ${partition}/${total_partitions} ${remote}${dir}"
+    if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
+      echo "Reusing existing raw listing: $raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$chunk_name" \
+        --chunk-status listed
+    else
+      echo "Listing ${source} ${dir} hash partition ${partition}/${total_partitions}..."
+      local tmp_file="${raw_file}.tmp"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$chunk_name" \
+        --chunk-status listing
+      run_listing "${source} ${dir} #${partition}/${total_partitions}" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" --hash-filter "${partition}/${total_partitions}" "${remote}${dir}"
+      mv "$tmp_file" "$raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$chunk_name" \
+        --chunk-status listed
+    fi
+  fi
+
+  echo "Ingesting ${source} hash chunk ${chunk_name} into SQLite..."
+  python3 scripts/catalog_media.py \
+    --db "$OUT_DIR/media_catalog.sqlite" \
+    --run-id "$RUN_ID" \
+    --source "$source" \
+    --remote "$remote" \
+    --raw-file "$raw_file" \
+    --rclone-command "$rclone_cmd"
+
+  python3 scripts/catalog_media.py \
+    --db "$OUT_DIR/media_catalog.sqlite" \
+    --run-id "$RUN_ID" \
+    --source "$source" \
+    --remote "$remote" \
+    --raw-file "$raw_file" \
+    --rclone-command "$rclone_cmd" \
+    --chunk-name "$chunk_name" \
+    --chunk-status ingested
+
+  printf "%s\n" "$chunk_name" >> "$done_file"
 }
 
 if [[ -n "$WASABI_REMOTE" ]]; then

@@ -264,6 +264,8 @@ def main():
     os.makedirs(os.path.dirname(args.db), exist_ok=True)
     conn = sqlite3.connect(args.db)
     try:
+        # Enable WAL mode for safe concurrent writes from parallel processes
+        conn.execute("PRAGMA journal_mode=WAL")
         ensure_schema(conn)
         if args.chunk_status:
             update_chunk(conn, args, args.chunk_status)
