@@ -76,21 +76,81 @@ record_run_id() {
 run_one() {
   local source="$1"
   local remote="$2"
-  local raw_file="$OUT_DIR/raw/${source}_${RUN_ID}.lsl"
   local log_file="$OUT_DIR/logs/${source}_${RUN_ID}.rclone.log"
-  local rclone_cmd
-  rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} ${remote}"
+  local done_file="$OUT_DIR/raw/${source}_${RUN_ID}.done_dirs"
+  local topdirs_file="$OUT_DIR/raw/${source}_${RUN_ID}.topdirs"
 
-  if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
-    echo "Reusing existing raw listing: $raw_file"
+  if [[ -f "$topdirs_file" && "$FORCE" != "true" ]]; then
+    echo "Reusing existing top-level dir list: $topdirs_file"
   else
-    echo "Listing ${source} (${remote})..."
-    local tmp_file="${raw_file}.tmp"
-    rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}" > "$tmp_file" 2> "$log_file"
-    mv "$tmp_file" "$raw_file"
+    echo "Listing top-level dirs for ${source} (${remote})..."
+    local tmp_dirs="${topdirs_file}.tmp"
+    rclone lsf --dirs-only --max-depth 1 "${remote}" > "$tmp_dirs" 2>> "$log_file"
+    mv "$tmp_dirs" "$topdirs_file"
   fi
 
-  echo "Ingesting ${source} into SQLite..."
+  mapfile -t TOP_DIRS < "$topdirs_file" || true
+
+  # Always process root-level files separately (files not in any top-level dir).
+  local root_chunk="__root__"
+  process_chunk "$source" "$remote" "$root_chunk" "$done_file" "$log_file"
+
+  if [[ ${#TOP_DIRS[@]} -eq 0 ]]; then
+    echo "No top-level dirs found; root listing should cover all objects."
+  else
+    for dir in "${TOP_DIRS[@]}"; do
+      process_chunk "$source" "$remote" "$dir" "$done_file" "$log_file"
+    done
+  fi
+}
+
+process_chunk() {
+  local source="$1"
+  local remote="$2"
+  local dir="$3"
+  local done_file="$4"
+  local log_file="$5"
+
+  if [[ -f "$done_file" ]] && grep -Fqx -- "$dir" "$done_file"; then
+    echo "Skipping already completed chunk: $dir"
+    return 0
+  fi
+
+  local raw_suffix
+  if [[ "$dir" == "__root__" ]]; then
+    raw_suffix="root"
+  else
+    raw_suffix="${dir%/}"
+    raw_suffix="${raw_suffix//\//__}"
+    raw_suffix="${raw_suffix:-root}"
+  fi
+
+  local raw_file="$OUT_DIR/raw/${source}_${RUN_ID}.${raw_suffix}.lsl"
+  local rclone_cmd
+
+  if [[ "$dir" == "__root__" ]]; then
+    rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} --max-depth 1 ${remote}"
+    if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
+      echo "Reusing existing raw listing: $raw_file"
+    else
+      echo "Listing ${source} root (${remote})..."
+      local tmp_file="${raw_file}.tmp"
+      rclone lsl "${RCLONE_OPTS_ARR[@]}" --max-depth 1 "${remote}" > "$tmp_file" 2>> "$log_file"
+      mv "$tmp_file" "$raw_file"
+    fi
+  else
+    rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} ${remote}${dir}"
+    if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
+      echo "Reusing existing raw listing: $raw_file"
+    else
+      echo "Listing ${source} dir ${dir}..."
+      local tmp_file="${raw_file}.tmp"
+      rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}${dir}" > "$tmp_file" 2>> "$log_file"
+      mv "$tmp_file" "$raw_file"
+    fi
+  fi
+
+  echo "Ingesting ${source} chunk ${dir} into SQLite..."
   python3 scripts/catalog_media.py \
     --db "$OUT_DIR/media_catalog.sqlite" \
     --run-id "$RUN_ID" \
@@ -98,6 +158,8 @@ run_one() {
     --remote "$remote" \
     --raw-file "$raw_file" \
     --rclone-command "$rclone_cmd"
+
+  printf "%s\n" "$dir" >> "$done_file"
 }
 
 if [[ -n "$WASABI_REMOTE" ]]; then
