@@ -23,6 +23,46 @@ Examples:
 USAGE
 }
 
+log_status() {
+  local msg="$1"
+  printf "%s %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >&2
+}
+
+run_listing() {
+  local label="$1"
+  local tmp_file="$2"
+  local log_file="$3"
+  shift 3
+  local -a cmd=( "$@" )
+
+  log_status "START listing ${label}: ${cmd[*]}"
+  local start_ts
+  start_ts="$(date +%s)"
+
+  "${cmd[@]}" > "$tmp_file" 2>> "$log_file" &
+  local pid=$!
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local now elapsed bytes
+    now="$(date +%s)"
+    elapsed=$((now - start_ts))
+    bytes=0
+    if [[ -f "$tmp_file" ]]; then
+      bytes="$(stat -f %z "$tmp_file" 2>/dev/null || echo 0)"
+    fi
+    log_status "RUN listing ${label} elapsed=${elapsed}s bytes=${bytes}"
+    sleep 60
+  done
+
+  wait "$pid"
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    log_status "ERROR listing ${label} exit=${rc}"
+    return "$rc"
+  fi
+  log_status "DONE listing ${label}"
+}
+
 WASABI_REMOTE=""
 GDRIVE_REMOTE=""
 OUT_DIR="./catalog"
@@ -153,7 +193,8 @@ process_chunk() {
         --rclone-command "$rclone_cmd" \
         --chunk-name "$dir" \
         --chunk-status listing
-      rclone lsl "${RCLONE_OPTS_ARR[@]}" --max-depth 1 "${remote}" > "$tmp_file" 2>> "$log_file"
+      run_listing "${source} root" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" --max-depth 1 "${remote}"
       mv "$tmp_file" "$raw_file"
       python3 scripts/catalog_media.py \
         --db "$OUT_DIR/media_catalog.sqlite" \
@@ -190,7 +231,8 @@ process_chunk() {
         --rclone-command "$rclone_cmd" \
         --chunk-name "$dir" \
         --chunk-status listing
-      rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}${dir}" > "$tmp_file" 2>> "$log_file"
+      run_listing "${source} ${dir}" "$tmp_file" "$log_file" \
+        rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}${dir}"
       mv "$tmp_file" "$raw_file"
       python3 scripts/catalog_media.py \
         --db "$OUT_DIR/media_catalog.sqlite" \
