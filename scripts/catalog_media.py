@@ -134,7 +134,7 @@ def ingest(conn, args):
             if len(batch) >= batch_size:
                 conn.executemany(
                     """
-                    INSERT OR IGNORE INTO files
+                    INSERT OR REPLACE INTO files
                     (run_id, source, remote, path, size, modtime, ext, is_media, media_kind, ignored_reason)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -147,7 +147,7 @@ def ingest(conn, args):
     if batch:
         conn.executemany(
             """
-            INSERT OR IGNORE INTO files
+            INSERT OR REPLACE INTO files
             (run_id, source, remote, path, size, modtime, ext, is_media, media_kind, ignored_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
