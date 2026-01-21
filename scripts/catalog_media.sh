@@ -129,7 +129,13 @@ run_one() {
     mv "$tmp_dirs" "$topdirs_file"
   fi
 
-  mapfile -t TOP_DIRS < "$topdirs_file" || true
+  TOP_DIRS=()
+  if [[ -f "$topdirs_file" ]]; then
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      TOP_DIRS+=("$line")
+    done < "$topdirs_file"
+  fi
 
   # Always process root-level files separately (files not in any top-level dir).
   local root_chunk="__root__"

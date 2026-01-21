@@ -3,7 +3,7 @@ import argparse
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 PHOTO_EXTS = {
     "jpg", "jpeg", "heic", "heif", "png", "gif", "tif", "tiff", "bmp", "webp",
@@ -94,7 +94,7 @@ def ensure_schema(conn):
 def update_chunk(conn, args, status):
     if not args.chunk_name:
         raise ValueError("chunk-name is required when updating chunk status")
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     row = conn.execute(
         """
         SELECT started_at, listed_at, completed_at
@@ -172,7 +172,7 @@ def classify_ext(path):
 
 
 def ingest(conn, args):
-    started_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute(
         """
         INSERT OR REPLACE INTO runs
@@ -249,7 +249,7 @@ def ingest(conn, args):
         conn.commit()
         inserted += len(batch)
 
-    completed_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute(
         "UPDATE runs SET completed_at = ? WHERE run_id = ? AND source = ?",
         (completed_at, args.run_id, args.source),
