@@ -121,11 +121,11 @@ run_one() {
   local topdirs_file="$OUT_DIR/raw/${source}_${RUN_ID}.topdirs"
 
   if [[ -f "$topdirs_file" && "$FORCE" != "true" ]]; then
-    echo "Reusing existing top-level dir list: $topdirs_file"
+    echo "Reusing existing dir list: $topdirs_file"
   else
-    echo "Listing top-level dirs for ${source} (${remote})..."
+    echo "Listing dirs (depth 2) for ${source} (${remote})..."
     local tmp_dirs="${topdirs_file}.tmp"
-    rclone lsf --dirs-only --max-depth 1 "${remote}" > "$tmp_dirs" 2>> "$log_file"
+    rclone lsf --dirs-only --max-depth 2 "${remote}" > "$tmp_dirs" 2>> "$log_file"
     mv "$tmp_dirs" "$topdirs_file"
   fi
 
@@ -133,7 +133,20 @@ run_one() {
   if [[ -f "$topdirs_file" ]]; then
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
-      TOP_DIRS+=("$line")
+      # Prefer second-level dirs like "seagate/Photos/"
+      if [[ "$line" == */*/* ]]; then
+        TOP_DIRS+=("$line")
+      fi
+    done < "$topdirs_file"
+  fi
+
+  if [[ ${#TOP_DIRS[@]} -eq 0 && -f "$topdirs_file" ]]; then
+    # Fallback to top-level dirs if no second-level dirs exist.
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      if [[ "$line" == */ && "$line" != */*/* ]]; then
+        TOP_DIRS+=("$line")
+      fi
     done < "$topdirs_file"
   fi
 
