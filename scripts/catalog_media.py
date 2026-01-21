@@ -36,6 +36,7 @@ def ensure_schema(conn):
             started_at TEXT NOT NULL,
             raw_file TEXT NOT NULL,
             rclone_command TEXT NOT NULL,
+            completed_at TEXT,
             PRIMARY KEY (run_id, source)
         )
         """
@@ -53,7 +54,8 @@ def ensure_schema(conn):
             ext TEXT NOT NULL,
             is_media INTEGER NOT NULL,
             media_kind TEXT NOT NULL,
-            ignored_reason TEXT NOT NULL
+            ignored_reason TEXT NOT NULL,
+            UNIQUE(run_id, source, path)
         )
         """
     )
@@ -132,7 +134,7 @@ def ingest(conn, args):
             if len(batch) >= batch_size:
                 conn.executemany(
                     """
-                    INSERT INTO files
+                    INSERT OR IGNORE INTO files
                     (run_id, source, remote, path, size, modtime, ext, is_media, media_kind, ignored_reason)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -145,7 +147,7 @@ def ingest(conn, args):
     if batch:
         conn.executemany(
             """
-            INSERT INTO files
+            INSERT OR IGNORE INTO files
             (run_id, source, remote, path, size, modtime, ext, is_media, media_kind, ignored_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -153,6 +155,13 @@ def ingest(conn, args):
         )
         conn.commit()
         inserted += len(batch)
+
+    completed_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "UPDATE runs SET completed_at = ? WHERE run_id = ? AND source = ?",
+        (completed_at, args.run_id, args.source),
+    )
+    conn.commit()
 
     print(f"Ingested {inserted} records from {total} lines.")
 

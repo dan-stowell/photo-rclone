@@ -84,7 +84,9 @@ run_one() {
     echo "Reusing existing raw listing: $raw_file"
   else
     echo "Listing ${source} (${remote})..."
-    rclone lsl ${RCLONE_OPTS} "${remote}" > "$raw_file" 2> "$log_file"
+    local tmp_file="${raw_file}.tmp"
+    rclone lsl ${RCLONE_OPTS} "${remote}" > "$tmp_file" 2> "$log_file"
+    mv "$tmp_file" "$raw_file"
   fi
 
   echo "Ingesting ${source} into SQLite..."
