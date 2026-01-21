@@ -132,21 +132,75 @@ process_chunk() {
     rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} --max-depth 1 ${remote}"
     if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
       echo "Reusing existing raw listing: $raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$dir" \
+        --chunk-status listed
     else
       echo "Listing ${source} root (${remote})..."
       local tmp_file="${raw_file}.tmp"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$dir" \
+        --chunk-status listing
       rclone lsl "${RCLONE_OPTS_ARR[@]}" --max-depth 1 "${remote}" > "$tmp_file" 2>> "$log_file"
       mv "$tmp_file" "$raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$dir" \
+        --chunk-status listed
     fi
   else
     rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} ${remote}${dir}"
     if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
       echo "Reusing existing raw listing: $raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$dir" \
+        --chunk-status listed
     else
       echo "Listing ${source} dir ${dir}..."
       local tmp_file="${raw_file}.tmp"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$dir" \
+        --chunk-status listing
       rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}${dir}" > "$tmp_file" 2>> "$log_file"
       mv "$tmp_file" "$raw_file"
+      python3 scripts/catalog_media.py \
+        --db "$OUT_DIR/media_catalog.sqlite" \
+        --run-id "$RUN_ID" \
+        --source "$source" \
+        --remote "$remote" \
+        --raw-file "$raw_file" \
+        --rclone-command "$rclone_cmd" \
+        --chunk-name "$dir" \
+        --chunk-status listed
     fi
   fi
 
@@ -158,6 +212,16 @@ process_chunk() {
     --remote "$remote" \
     --raw-file "$raw_file" \
     --rclone-command "$rclone_cmd"
+
+  python3 scripts/catalog_media.py \
+    --db "$OUT_DIR/media_catalog.sqlite" \
+    --run-id "$RUN_ID" \
+    --source "$source" \
+    --remote "$remote" \
+    --raw-file "$raw_file" \
+    --rclone-command "$rclone_cmd" \
+    --chunk-name "$dir" \
+    --chunk-status ingested
 
   printf "%s\n" "$dir" >> "$done_file"
 }

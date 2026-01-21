@@ -23,6 +23,12 @@ def parse_args():
     p.add_argument("--remote", required=True)
     p.add_argument("--raw-file", required=True)
     p.add_argument("--rclone-command", required=True)
+    p.add_argument("--chunk-name")
+    p.add_argument(
+        "--chunk-status",
+        choices=["listing", "listed", "ingested", "error"],
+        help="If set, only update chunk status and exit.",
+    )
     return p.parse_args()
 
 
@@ -41,6 +47,25 @@ def ensure_schema(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chunks (
+            run_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            remote TEXT NOT NULL,
+            chunk_name TEXT NOT NULL,
+            rclone_command TEXT NOT NULL,
+            raw_file TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT,
+            listed_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, source, chunk_name)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS files (
@@ -63,6 +88,74 @@ def ensure_schema(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_run ON files(run_id)")
+    conn.commit()
+
+
+def update_chunk(conn, args, status):
+    if not args.chunk_name:
+        raise ValueError("chunk-name is required when updating chunk status")
+    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    row = conn.execute(
+        """
+        SELECT started_at, listed_at, completed_at
+        FROM chunks
+        WHERE run_id = ? AND source = ? AND chunk_name = ?
+        """,
+        (args.run_id, args.source, args.chunk_name),
+    ).fetchone()
+
+    started_at, listed_at, completed_at = (row or (None, None, None))
+    if status == "listing" and started_at is None:
+        started_at = ts
+    if status == "listed":
+        listed_at = ts
+    if status == "ingested":
+        completed_at = ts
+
+    if row is None:
+        conn.execute(
+            """
+            INSERT INTO chunks
+            (run_id, source, remote, chunk_name, rclone_command, raw_file, status,
+             started_at, listed_at, completed_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                args.run_id,
+                args.source,
+                args.remote,
+                args.chunk_name,
+                args.rclone_command,
+                args.raw_file,
+                status,
+                started_at,
+                listed_at,
+                completed_at,
+                ts,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE chunks
+            SET remote = ?, rclone_command = ?, raw_file = ?, status = ?,
+                started_at = ?, listed_at = ?, completed_at = ?, updated_at = ?
+            WHERE run_id = ? AND source = ? AND chunk_name = ?
+            """,
+            (
+                args.remote,
+                args.rclone_command,
+                args.raw_file,
+                status,
+                started_at,
+                listed_at,
+                completed_at,
+                ts,
+                args.run_id,
+                args.source,
+                args.chunk_name,
+            ),
+        )
     conn.commit()
 
 
@@ -172,6 +265,9 @@ def main():
     conn = sqlite3.connect(args.db)
     try:
         ensure_schema(conn)
+        if args.chunk_status:
+            update_chunk(conn, args, args.chunk_status)
+            return
         ingest(conn, args)
     finally:
         conn.close()
