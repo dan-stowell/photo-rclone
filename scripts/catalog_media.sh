@@ -63,7 +63,8 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-RCLONE_OPTS="${RCLONE_OPTS:---fast-list --stats-one-line --stats=10s}"
+RCLONE_OPTS_STR="${RCLONE_OPTS:---fast-list --stats-one-line --stats=10s}"
+IFS=' ' read -r -a RCLONE_OPTS_ARR <<< "$RCLONE_OPTS_STR"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 mkdir -p "$OUT_DIR/raw" "$OUT_DIR/logs"
@@ -78,14 +79,14 @@ run_one() {
   local raw_file="$OUT_DIR/raw/${source}_${RUN_ID}.lsl"
   local log_file="$OUT_DIR/logs/${source}_${RUN_ID}.rclone.log"
   local rclone_cmd
-  rclone_cmd="rclone lsl ${RCLONE_OPTS} ${remote}"
+  rclone_cmd="rclone lsl ${RCLONE_OPTS_STR} ${remote}"
 
   if [[ -f "$raw_file" && "$FORCE" != "true" ]]; then
     echo "Reusing existing raw listing: $raw_file"
   else
     echo "Listing ${source} (${remote})..."
     local tmp_file="${raw_file}.tmp"
-    rclone lsl ${RCLONE_OPTS} "${remote}" > "$tmp_file" 2> "$log_file"
+    rclone lsl "${RCLONE_OPTS_ARR[@]}" "${remote}" > "$tmp_file" 2> "$log_file"
     mv "$tmp_file" "$raw_file"
   fi
 
